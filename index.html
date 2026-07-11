@@ -144,6 +144,18 @@
       <div id="recentList"><div class="empty">No anomalies recorded yet.</div></div>
     </div>
 
+    <div class="panel">
+      <h2>Export data</h2>
+      <p style="font-size:12.5px;color:var(--muted);line-height:1.5;margin:0 0 12px;">
+        Download all currently recorded anomalies as a spreadsheet — useful for sharing with city road authorities, insurers, or emergency services.
+      </p>
+      <button class="btn-main" id="exportBtn" style="background:var(--asphalt-700); color:var(--off-white); margin-bottom:10px;">Export as CSV</button>
+      <p style="font-size:12.5px;color:var(--muted);line-height:1.5;margin:12px 0;">
+        Or share the live map itself — the recipient opens the same app and sees the current state, since all reports sync through the same shared database.
+      </p>
+      <button class="btn-main" id="shareBtn" style="background:var(--asphalt-700); color:var(--off-white);">Share live map</button>
+    </div>
+
     <div class="notice">
       <b>Note:</b> This is a functional prototype. Anomalies are removed if not re-detected within <b>3 days</b>. Data is shared through a free Firebase database — every user of this page sees the same anomalies. The app must stay open with the screen on.
     </div>
@@ -243,6 +255,12 @@
     return '#F5C518';
   }
 
+  function severityLabel(magnitude){
+    if(magnitude >= 14) return 'Severe';
+    if(magnitude >= 8) return 'Moderate';
+    return 'Light';
+  }
+
   function renderMeMarker(lat,lng){
     if(!meMarker){
       meMarker = L.circleMarker([lat,lng], {radius:7, color:'#5B8CFF', fillColor:'#5B8CFF', fillOpacity:0.9, weight:2}).addTo(map);
@@ -268,7 +286,7 @@
           radius, color, fillColor:color, fillOpacity: isInactive ? 0.35 : 0.55, weight:1.5, opacity: isInactive ? 0.4 : 0.8
         }).addTo(map);
         const status = isInactive ? '<br><span style="color:#9B9B9F;">[Inactive — expires in 3 days]</span>' : '';
-        m.bindPopup(`<b>Anomaly</b><br>Confirmations: ${a.confirmations}<br>Magnitude: ${a.magnitude.toFixed(1)}${status}`);
+        m.bindPopup(`<b>Anomaly</b><br>Confirmations: ${a.confirmations}<br>Magnitude: ${a.magnitude.toFixed(1)}<br>Damage level: ${severityLabel(a.magnitude)}${status}`);
         anomalyMarkers[a.id] = m;
       }
     });
@@ -333,8 +351,11 @@
     return list;
   }
 
+  let lastKnownList = [];
+
   function refreshUI(list){
     list = cleanupExpiredAnomalies(list);
+    lastKnownList = list;
     renderAnomalies(list);
     document.getElementById('statNearby').textContent = list.length;
     document.getElementById('statMine').textContent = myDetections;
@@ -362,7 +383,7 @@
       const statusStr = isInactive ? ' (expiring)' : '';
       return `<div class="list-item">
         <span>${a.lat.toFixed(4)}, ${a.lng.toFixed(4)}</span>
-        <span class="meta">${timeStr}</span>
+        <span class="meta">${severityLabel(a.magnitude)} · ${timeStr}</span>
         <span class="badge ${badgeClass}">${a.confirmations}×${statusStr}</span>
       </div>`;
     }).join('');
@@ -509,6 +530,63 @@
       map.setView([pos.coords.latitude, pos.coords.longitude], 15);
     }, ()=>{}, {enableHighAccuracy:false, timeout:5000});
   }
+
+  document.getElementById('exportBtn').addEventListener('click', ()=>{
+    if(lastKnownList.length === 0){
+      alert('No anomalies to export yet.');
+      return;
+    }
+    const headers = ['id','latitude','longitude','confirmations','magnitude','damage_level','first_seen_utc','last_seen_utc','status'];
+    const rows = lastKnownList.map(a=>{
+      const daysSinceSeen = (Date.now() - a.lastSeen) / (24*3600*1000);
+      const status = daysSinceSeen >= 3 ? 'expiring' : 'active';
+      return [
+        a.id,
+        a.lat.toFixed(6),
+        a.lng.toFixed(6),
+        a.confirmations,
+        a.magnitude.toFixed(2),
+        severityLabel(a.magnitude),
+        new Date(a.firstSeen).toISOString(),
+        new Date(a.lastSeen).toISOString(),
+        status
+      ].join(',');
+    });
+    const csv = [headers.join(','), ...rows].join('\n');
+    const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `pothole-radar-export-${new Date().toISOString().slice(0,10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  });
+
+  document.getElementById('shareBtn').addEventListener('click', async ()=>{
+    const activeCount = lastKnownList.filter(a=>{
+      const daysSinceSeen = (Date.now() - a.lastSeen) / (24*3600*1000);
+      return daysSinceSeen < 3;
+    }).length;
+    const shareText = `Pothole Radar — live shared map, ${activeCount} active hazard${activeCount===1?'':'s'} reported nearby right now.`;
+    const shareUrl = window.location.href;
+
+    if(navigator.share){
+      try{
+        await navigator.share({title:'Pothole Radar', text: shareText, url: shareUrl});
+      }catch(e){ /* user cancelled share, ignore */ }
+    } else if(navigator.clipboard){
+      try{
+        await navigator.clipboard.writeText(shareUrl);
+        alert('Link copied to clipboard — paste it to share.');
+      }catch(e){
+        alert(shareUrl);
+      }
+    } else {
+      alert(shareUrl);
+    }
+  });
 
   pollAndRefresh();
   setInterval(pollAndRefresh, 8000);
