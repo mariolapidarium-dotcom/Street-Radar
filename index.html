@@ -27,6 +27,14 @@
 
   header{padding:16px 18px 12px; position:relative; z-index:5;}
   .eyebrow{font-family:'JetBrains Mono',monospace; font-size:11px; letter-spacing:.12em; color:var(--muted); text-transform:uppercase; display:flex; justify-content:space-between; align-items:center;}
+  .header-top{display:flex; justify-content:space-between; align-items:flex-start;}
+  .share-icon-btn{
+    background:var(--asphalt-800); border:1px solid var(--line-hairline); border-radius:8px;
+    width:38px; height:38px; display:flex; align-items:center; justify-content:center;
+    cursor:pointer; flex-shrink:0; margin-left:10px;
+  }
+  .share-icon-btn:active{background:var(--asphalt-700);}
+  .share-icon-btn svg{width:18px; height:18px; stroke:var(--safety-yellow);}
   .dot{display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:5px; background:var(--muted);}
   .dot.on{background:var(--signal-green); box-shadow:0 0 6px var(--signal-green);}
   .dot.off{background:var(--danger-red); box-shadow:0 0 6px var(--danger-red);}
@@ -101,13 +109,26 @@
 <div class="app">
 
   <header>
-    <div class="eyebrow">
-      <span><span class="dot" id="dotGps"></span>GPS</span>
-      <span><span class="dot" id="dotMotion"></span>SENSOR</span>
-      <span><span class="dot" id="dotDb"></span>DB</span>
+    <div class="header-top">
+      <div style="flex:1; min-width:0;">
+        <div class="eyebrow">
+          <span><span class="dot" id="dotGps"></span>GPS</span>
+          <span><span class="dot" id="dotMotion"></span>SENSOR</span>
+          <span><span class="dot" id="dotDb"></span>DB</span>
+        </div>
+        <h1>POTHOLE<span>RADAR</span></h1>
+        <p class="subtitle">A prototype for detecting potholes and road irregularities using the accelerometer, with a shared map across all users.</p>
+      </div>
+      <button class="share-icon-btn" id="shareIconBtn" aria-label="Share">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="18" cy="5" r="3"></circle>
+          <circle cx="6" cy="12" r="3"></circle>
+          <circle cx="18" cy="19" r="3"></circle>
+          <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line>
+          <line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line>
+        </svg>
+      </button>
     </div>
-    <h1>POTHOLE<span>RADAR</span></h1>
-    <p class="subtitle">A prototype for detecting potholes and road irregularities using the accelerometer, with a shared map across all users.</p>
   </header>
 
   <div class="tape"></div>
@@ -142,6 +163,15 @@
     <div class="panel">
       <h2>Recent anomalies</h2>
       <div id="recentList"><div class="empty">No anomalies recorded yet.</div></div>
+    </div>
+
+    <div class="panel">
+      <h2>Navigate to address</h2>
+      <div class="slider-row" style="gap:8px;">
+        <input type="text" id="destInput" placeholder="e.g. Ilica 1, Zagreb" style="flex:1; padding:10px 12px; border-radius:8px; border:1px solid var(--line-hairline); background:var(--asphalt-900); color:var(--off-white); font-family:'Inter',sans-serif; font-size:14px;">
+      </div>
+      <button class="btn-main" id="navBtn" style="margin-top:10px;">Show route</button>
+      <div id="navResult" style="font-size:12.5px; color:var(--muted); margin-top:10px; line-height:1.5;"></div>
     </div>
 
     <div class="panel">
@@ -190,6 +220,7 @@
   let motionHandler = null;
   let currentPos = null;
   let sessionId = 'g-' + Math.random().toString(36).slice(2,8);
+  let wakeLock = null;
 
   let sensitivity = 5;
   let lastDetectionTime = 0;
@@ -247,6 +278,8 @@
 
   let meMarker = null;
   let anomalyMarkers = {};
+  let routeLine = null;
+  let destMarker = null;
 
   function colorForConfirmations(c, isInactive){
     if(isInactive) return '#9B9B9F';
@@ -260,6 +293,8 @@
     if(magnitude >= 8) return 'Moderate';
     return 'Light';
   }
+
+  const COLLISION_THRESHOLD = 28; // very high impact — independent of the user's sensitivity slider
 
   function renderMeMarker(lat,lng){
     if(!meMarker){
@@ -323,16 +358,19 @@
 
   function cleanupExpiredAnomalies(list){
     const now = Date.now();
-    return list.filter(a => (now - a.lastSeen) < DATA_EXPIRY_MS);
+    return list
+      .filter(a => (now - a.lastSeen) < DATA_EXPIRY_MS)
+      .map(a => ({...a, type: a.type || 'pothole'}));
   }
 
-  async function addAnomaly(lat,lng,magnitude){
+  async function addAnomaly(lat,lng,magnitude,type){
+    type = type || 'pothole';
     let list = await loadAnomalies();
     list = cleanupExpiredAnomalies(list);
 
     let matched = null;
     for(const a of list){
-      if(haversine(lat,lng,a.lat,a.lng) <= CLUSTER_RADIUS_M){ matched = a; break; }
+      if(a.type === type && haversine(lat,lng,a.lat,a.lng) <= CLUSTER_RADIUS_M){ matched = a; break; }
     }
 
     const now = Date.now();
@@ -343,7 +381,7 @@
     } else {
       list.push({
         id: 'a-' + Date.now() + '-' + Math.random().toString(36).slice(2,6),
-        lat, lng, magnitude, confirmations:1,
+        lat, lng, magnitude, type, confirmations:1,
         firstSeen: now, lastSeen: now, reporter: sessionId
       });
     }
@@ -352,11 +390,19 @@
   }
 
   let lastKnownList = [];
+  const MAP_VISIBLE_RADIUS_M = 200;
 
   function refreshUI(list){
     list = cleanupExpiredAnomalies(list);
     lastKnownList = list;
-    renderAnomalies(list);
+
+    // While actively tracking, only draw nearby markers on the map itself to
+    // keep it readable — stats and the list below still reflect everything.
+    const mapList = (tracking && currentPos)
+      ? list.filter(a => haversine(currentPos.lat, currentPos.lng, a.lat, a.lng) <= MAP_VISIBLE_RADIUS_M)
+      : list;
+    renderAnomalies(mapList);
+
     document.getElementById('statNearby').textContent = list.length;
     document.getElementById('statMine').textContent = myDetections;
 
@@ -413,10 +459,33 @@
     }
   }
 
-  function showWarning(text){
+  let audioCtx = null;
+
+  function playWarningBeep(count){
+    if(!audioCtx) return;
+    try{
+      const now = audioCtx.currentTime;
+      const offsets = Array.from({length: count}, (_,i) => i * 0.18);
+      offsets.forEach(offset=>{
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'square';
+        osc.frequency.value = 880;
+        gain.gain.setValueAtTime(0.0001, now + offset);
+        gain.gain.exponentialRampToValueAtTime(0.35, now + offset + 0.01);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + offset + 0.15);
+        osc.connect(gain).connect(audioCtx.destination);
+        osc.start(now + offset);
+        osc.stop(now + offset + 0.16);
+      });
+    }catch(e){ /* audio not available — fail silently */ }
+  }
+
+  function showWarning(text, beepCount){
     const el = document.getElementById('warning');
     document.getElementById('warningText').textContent = text;
     el.style.display = 'flex';
+    playWarningBeep(beepCount || 3);
     clearTimeout(showWarning._t);
     showWarning._t = setTimeout(()=>{ el.style.display='none'; }, 6000);
   }
@@ -435,18 +504,21 @@
     baseline = baseline + ALPHA * (mag - baseline);
 
     const threshold = thresholdFromSensitivity(sensitivity);
-    if(deviation > threshold){
+    const isCollisionImpact = deviation > COLLISION_THRESHOLD;
+    if(deviation > threshold || isCollisionImpact){
       const now = Date.now();
       const tooSoon = (now - lastDetectionTime) < 2500;
       let tooClose = false;
       if(lastDetectionPos && currentPos){
         tooClose = haversine(currentPos.lat, currentPos.lng, lastDetectionPos.lat, lastDetectionPos.lng) < 15;
       }
-      if(!tooSoon && !tooClose && currentPos){
+      // collisions always get logged even if a detection just happened nearby —
+      // this is a much rarer, more serious event than a pothole bump
+      if((!tooSoon && !tooClose && currentPos) || (isCollisionImpact && currentPos)){
         lastDetectionTime = now;
         lastDetectionPos = {lat:currentPos.lat, lng:currentPos.lng};
         myDetections += 1;
-        addAnomaly(currentPos.lat, currentPos.lng, deviation).then(list=>refreshUI(list));
+        addAnomaly(currentPos.lat, currentPos.lng, deviation, isCollisionImpact ? 'collision' : 'pothole').then(list=>refreshUI(list));
       }
     }
   }
@@ -482,6 +554,24 @@
     document.getElementById('dotGps').className = 'dot';
   }
 
+  async function requestWakeLock(){
+    if('wakeLock' in navigator){
+      try{
+        wakeLock = await navigator.wakeLock.request('screen');
+        wakeLock.addEventListener('release', ()=>{ wakeLock = null; });
+      }catch(e){ /* wake lock not available (e.g. low battery) — fail silently */ }
+    }
+  }
+
+  function releaseWakeLock(){
+    if(wakeLock){ wakeLock.release(); wakeLock = null; }
+  }
+
+  // Re-acquire the wake lock if the tab regains visibility while tracking is on
+  document.addEventListener('visibilitychange', ()=>{
+    if(tracking && document.visibilityState === 'visible'){ requestWakeLock(); }
+  });
+
   // ---------- UI wiring ----------
   const sensSlider = document.getElementById('sensSlider');
   const sensVal = document.getElementById('sensVal');
@@ -496,8 +586,15 @@
       trackBtn.disabled = true;
       trackBtn.textContent = 'Requesting permissions…';
 
+      if(!audioCtx){
+        try{ audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }catch(e){ /* no audio support */ }
+      } else if(audioCtx.state === 'suspended'){
+        audioCtx.resume();
+      }
+
       const motionOk = await requestMotionPermission();
       const geoOk = await startGeolocation();
+      await requestWakeLock();
 
       if(!motionOk){
         alert('Motion sensor access was not granted — detection will not work without it.');
@@ -518,6 +615,7 @@
     } else {
       if(motionHandler){ window.removeEventListener('devicemotion', motionHandler); motionHandler = null; }
       stopGeolocation();
+      releaseWakeLock();
       document.getElementById('dotMotion').className = 'dot';
       tracking = false;
       trackBtn.textContent = 'Start tracking';
@@ -564,7 +662,7 @@
     URL.revokeObjectURL(url);
   });
 
-  document.getElementById('shareBtn').addEventListener('click', async ()=>{
+  async function shareLiveMap(){
     const activeCount = lastKnownList.filter(a=>{
       const daysSinceSeen = (Date.now() - a.lastSeen) / (24*3600*1000);
       return daysSinceSeen < 3;
@@ -586,7 +684,82 @@
     } else {
       alert(shareUrl);
     }
+  }
+  document.getElementById('navBtn').addEventListener('click', async ()=>{
+    const resultBox = document.getElementById('navResult');
+    const address = document.getElementById('destInput').value.trim();
+    if(!address){ resultBox.textContent = 'Enter a destination address first.'; return; }
+    if(!currentPos){ resultBox.textContent = 'Waiting for GPS fix — start tracking first, or wait a moment.'; return; }
+
+    resultBox.textContent = 'Looking up address…';
+    try{
+      const geoRes = await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(address)}`);
+      const geoData = await geoRes.json();
+      if(!geoData || geoData.length === 0){
+        resultBox.textContent = 'Address not found — try being more specific.';
+        return;
+      }
+      const destLat = parseFloat(geoData[0].lat);
+      const destLng = parseFloat(geoData[0].lon);
+
+      resultBox.textContent = 'Calculating route…';
+      const routeRes = await fetch(`https://router.project-osrm.org/route/v1/driving/${currentPos.lng},${currentPos.lat};${destLng},${destLat}?overview=full&geometries=geojson&steps=true`);
+      const routeData = await routeRes.json();
+      if(!routeData.routes || routeData.routes.length === 0){
+        resultBox.textContent = 'Could not find a driving route to that address.';
+        return;
+      }
+      const route = routeData.routes[0];
+      const coords = route.geometry.coordinates.map(c => [c[1], c[0]]);
+
+      if(routeLine){ map.removeLayer(routeLine); }
+      if(destMarker){ map.removeLayer(destMarker); }
+      routeLine = L.polyline(coords, {color:'#5B8CFF', weight:5, opacity:0.85}).addTo(map);
+      destMarker = L.marker([destLat, destLng]).addTo(map).bindPopup(geoData[0].display_name);
+      map.fitBounds(routeLine.getBounds(), {padding:[30,30]});
+
+      const km = (route.distance/1000).toFixed(1);
+      const mins = Math.round(route.duration/60);
+
+      // Estimate road type per route segment from its travel speed (a proxy for
+      // lane count/width), so we don't count hazards on a far-away opposite
+      // carriageway on wide roads, while still catching close-by hazards on
+      // narrow streets where lanes sit closer together.
+      function radiusForSpeedKmh(kmh){
+        if(kmh >= 80) return 12; // motorway / expressway — wide, divided lanes
+        if(kmh >= 50) return 7;  // primary / rural road
+        return 5;                // urban / residential street
+      }
+
+      let hazardsOnRoute = 0;
+      const countedIds = new Set();
+      for(const leg of route.legs){
+        for(const step of leg.steps){
+          const stepCoords = step.geometry.coordinates.map(c => [c[1], c[0]]);
+          const speedKmh = (step.distance > 0 && step.duration > 0) ? (step.distance/step.duration)*3.6 : 30;
+          const radius = radiusForSpeedKmh(speedKmh);
+          for(const a of lastKnownList){
+            if(countedIds.has(a.id)) continue;
+            const daysSinceSeen = (Date.now()-a.lastSeen)/(24*3600*1000);
+            if(daysSinceSeen >= 3) continue;
+            for(const [lat,lng] of stepCoords){
+              if(haversine(a.lat,a.lng,lat,lng) <= radius){ countedIds.add(a.id); hazardsOnRoute++; break; }
+            }
+          }
+        }
+      }
+
+      resultBox.innerHTML = `Route: <b style="color:var(--off-white)">${km} km</b>, about <b style="color:var(--off-white)">${mins} min</b>.` +
+        (hazardsOnRoute > 0
+          ? `<br><span style="color:var(--hazard-orange)">⚠ ${hazardsOnRoute} known hazard${hazardsOnRoute===1?'':'s'} along this route.</span>`
+          : `<br>No known hazards reported along this route.`);
+    }catch(e){
+      resultBox.textContent = 'Something went wrong looking up the route. Check your connection and try again.';
+    }
   });
+
+  document.getElementById('shareBtn').addEventListener('click', shareLiveMap);
+  document.getElementById('shareIconBtn').addEventListener('click', shareLiveMap);
 
   pollAndRefresh();
   setInterval(pollAndRefresh, 8000);
