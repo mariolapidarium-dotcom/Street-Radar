@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Street-Radar Test Helper</title>
+<style>
+  body { font-family: monospace; max-width: 800px; margin: 40px auto; padding: 20px; background: #161618; color: #ECEAE4; }
+  .panel { background: #222226; border: 1px solid #3d3d44; border-radius: 8px; padding: 20px; margin: 20px 0; }
+  h1 { color: #F5C518; }
+  input, button { padding: 10px; margin: 5px; border-radius: 6px; border: 1px solid #3d3d44; background: #2f2f35; color: #ECEAE4; font-family: monospace; }
+  button { background: #F5C518; color: #161618; cursor: pointer; font-weight: bold; }
+  button:hover { background: #E8622C; }
+  .success { color: #4CAF6D; font-weight: bold; }
+  .error { color: #D9402A; font-weight: bold; }
+  pre { background: #161618; padding: 15px; border-radius: 6px; overflow-x: auto; border-left: 3px solid #F5C518; }
+  a { color: #5B8CFF; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+
+<h1>🛣️ Street-Radar Test Helper</h1>
+
+<div class="panel">
+  <h2>Quick Links</h2>
+  <p><a href="./index.html" target="_blank">→ Open Main App</a></p>
+  <p><a href="https://github.com/mariolapidarium-dotcom/Street-Radar" target="_blank">→ GitHub Repository</a></p>
+</div>
+
+<div class="panel">
+  <h2>📍 Add Test Anomaly</h2>
+  <p>Inject fake road anomalies into localStorage for testing.</p>
+  <label>Latitude: <input type="number" id="lat" value="45.815" step="0.001"></label><br>
+  <label>Longitude: <input type="number" id="lng" value="15.982" step="0.001"></label><br>
+  <label>Confirmations: <input type="number" id="conf" value="1" min="1" max="10"></label><br>
+  <button onclick="addTestAnomaly()">Add Anomaly</button>
+  <div id="result"></div>
+</div>
+
+<div class="panel">
+  <h2>🗑️ Clear All Data</h2>
+  <button onclick="clearAllData()" style="background: #D9402A;">⚠️ Clear Storage</button>
+  <div id="resultClear"></div>
+</div>
+
+<div class="panel">
+  <h2>📊 View Stored Anomalies</h2>
+  <button onclick="viewData()">Show Data</button>
+  <pre id="dataView" style="display: none; max-height: 400px; margin-top: 15px;"></pre>
+</div>
+
+<div class="panel">
+  <h2>💡 Testing Tips</h2>
+  <ul>
+    <li>Add test anomalies above, then open the main app</li>
+    <li>Data persists in localStorage across page reloads</li>
+    <li>Use multiple confirmations to test different threat levels (colors)</li>
+    <li>Nearby anomalies (within 20m) will cluster together</li>
+    <li>Try different coordinates to spread anomalies across the map</li>
+  </ul>
+</div>
+
+<script>
+const STORAGE_KEY = 'road-anomalies';
+
+function haversine(lat1, lon1, lat2, lon2) {
+  const R = 6371000;
+  const toRad = d => d * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1), dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+function addTestAnomaly() {
+  const lat = parseFloat(document.getElementById('lat').value);
+  const lng = parseFloat(document.getElementById('lng').value);
+  const conf = parseInt(document.getElementById('conf').value, 10);
+  
+  if (isNaN(lat) || isNaN(lng) || isNaN(conf)) {
+    showResult('result', '❌ Invalid input', 'error');
+    return;
+  }
+
+  const existing = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+  
+  // Check for nearby anomalies (within 20m)
+  let matched = null;
+  for (const a of existing) {
+    if (haversine(lat, lng, a.lat, a.lng) <= 20) {
+      matched = a;
+      break;
+    }
+  }
+
+  const now = Date.now();
+  if (matched) {
+    matched.confirmations += conf;
+    matched.lastSeen = now;
+    matched.magnitude = Math.max(matched.magnitude, Math.random() * 20 + 10);
+  } else {
+    existing.push({
+      id: 'test-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
+      lat, lng,
+      magnitude: Math.random() * 20 + 10,
+      confirmations: conf,
+      firstSeen: now,
+      lastSeen: now,
+      reporter: 'test-helper'
+    });
+  }
+
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(existing));
+  showResult('result', `✅ Added anomaly at ${lat.toFixed(4)}, ${lng.toFixed(4)} with ${conf} confirmation(s)`, 'success');
+  viewData();
+}
+
+function clearAllData() {
+  if (!confirm('⚠️ This will delete all stored anomalies. Continue?')) return;
+  localStorage.removeItem(STORAGE_KEY);
+  showResult('resultClear', '✅ All data cleared', 'success');
+  viewData();
+}
+
+function viewData() {
+  const data = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+  const view = document.getElementById('dataView');
+  view.style.display = 'block';
+  
+  if (data.length === 0) {
+    view.textContent = '(empty)';
+    return;
+  }
+
+  view.textContent = JSON.stringify(data, null, 2);
+}
+
+function showResult(elementId, message, type) {
+  const el = document.getElementById(elementId);
+  el.textContent = message;
+  el.className = type;
+}
+</script>
+
+</body>
+</html>
